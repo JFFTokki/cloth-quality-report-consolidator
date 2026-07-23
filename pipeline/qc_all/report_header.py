@@ -269,18 +269,14 @@ def extract_labeled_values(text: str, labels, value_pattern: str):
 def extract_same_line_labeled_values(text: str, labels, stop_labels=()):
     values = []
     stop_pattern = "|".join(stop_labels)
-    for line in str(text or "").splitlines():
-        for label in labels:
-            for match in re.finditer(rf"{label}\s*[：:]?\s*(.+)", line, re.I):
-                value = match.group(1)
-                if stop_pattern:
-                    value = re.split(rf"\s*(?:{stop_pattern})\s*[：:]?", value, maxsplit=1)[0]
-                code_match = re.match(rf"\s*({CODE_VALUE_PATTERN})", value, re.I)
-                if not code_match:
-                    continue
-                value = re.sub(r"\s+", "", code_match.group(1)).strip("：:;；,，")
-                if value and value not in values:
-                    values.append(value)
+    for label in labels:
+        for match in re.finditer(rf"{label}\s*[：:]?\s*([^\u3400-\u9fff]*)", str(text or ""), re.I):
+            value = match.group(1)
+            if stop_pattern:
+                value = re.split(rf"\s*(?:{stop_pattern})\s*[：:]?", value, maxsplit=1)[0]
+            value = re.sub(r"\s+", "", value)
+            if re.search(r"[A-Za-z0-9]", value) and value not in values:
+                values.append(value)
     return values
 
 

@@ -150,7 +150,9 @@ def main():
     ) == ["125FB-UZ-801"]
     assert extract_same_line_labeled_values("版单号：A1 中文说明", [r"版单号"]) == ["A1"]
     assert extract_same_line_labeled_values("版单号：ABC 中文说明", [r"版单号"]) == ["ABC"]
-    assert extract_same_line_labeled_values("版单号：ABC- 中文说明", [r"版单号"]) == ["ABC"]
+    assert extract_same_line_labeled_values("版单号：ABC- 中文说明", [r"版单号"]) == ["ABC-"]
+    assert extract_same_line_labeled_values("版单号：AB.12+CD(3)中文说明", [r"版单号"]) == ["AB.12+CD(3)"]
+    assert extract_same_line_labeled_values("版单号：AB 12/3下一字段", [r"版单号"]) == ["AB12/3"]
     assert extract_same_line_labeled_values(
         "版单号：426FZ-BS-925 年/季度：2026/Q4 颜色：黄绿色调00334",
         [r"版单号"],

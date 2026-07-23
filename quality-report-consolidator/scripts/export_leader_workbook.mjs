@@ -9,7 +9,7 @@ if (!inputPath || !outputPath) {
 
 const generatedAt = new Date().toISOString();
 const parserVersion = "pipeline/qc_all/build_100_sku_parent_child_report.py";
-const ruleVersion = "quality-report-consolidator-20260722-r9";
+const ruleVersion = "quality-report-consolidator-20260723-r10";
 const data = JSON.parse(await fs.readFile(inputPath, "utf8"));
 
 const functionalTerms = [
@@ -29,8 +29,9 @@ function compactText(value) {
 function cleanPlateNumbers(value) {
   const cleaned = [];
   for (const line of compactText(value).split(/\n+/)) {
-    const match = line.replace(/\s+/g, "").match(/^[A-Za-z0-9]+(?:[-/_][A-Za-z0-9]+)*/);
-    if (match && !cleaned.includes(match[0])) cleaned.push(match[0]);
+    const beforeChinese = line.match(/^[^\u3400-\u9fff]*/u)?.[0] ?? "";
+    const plateNumber = beforeChinese.replace(/\s+/g, "");
+    if (/[A-Za-z0-9]/.test(plateNumber) && !cleaned.includes(plateNumber)) cleaned.push(plateNumber);
   }
   return cleaned.join("\n");
 }

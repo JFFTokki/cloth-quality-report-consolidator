@@ -35,7 +35,7 @@ pdf_text_path = ROOT / "pdf_text.json"
 OCR_HELPER = Path(__file__).resolve().parent / "macos_vision_ocr.swift"
 OCR_ENABLED = os.environ.get("QC_ENABLE_OCR", "1") != "0"
 HEADER_OCR_ENABLED = os.environ.get("QC_ENABLE_HEADER_OCR", "1") != "0"
-HEADER_PARSER_VERSION = "report-header-v6"
+HEADER_PARSER_VERSION = "report-header-v7"
 EXTRACT_WORKERS = max(1, int(os.environ.get("QC_EXTRACT_WORKERS", "1")))
 OCR_RUNTIME = inspect_ocr_environment(OCR_HELPER)
 if OCR_ENABLED and not OCR_RUNTIME["ready"]:
