@@ -1,0 +1,45 @@
+# Local OS/editor noise
+.DS_Store
+
+# Local runtimes and installed dependencies
+.venv/
+node_modules
+quality-report-consolidator/vendor/
+__pycache__/
+*.py[cod]
+
+# Secrets and local credentials
+.env
+.env.*
+pkcs11.txt
+secrets/
+
+# Raw sources, downloaded reports, caches, and generated outputs
+input/
+tmp/
+outputs/
+downloads/
+file_manifest.json
+
+# Business data and traceable report artifacts
+*.xlsx
+*.xls
+*.csv
+*.pdf
+*.jsonl
+*.ndjson
+*.log
+*.png
+*.jpg
+*.jpeg
+
+# Pipeline data snapshots generated from source reports
+pipeline/qc_all/*.json
+
+# Packaged handoff artifacts; keep source files instead.
+*.zip
+internal-skill-packages/
+public-quality-report-consolidation-skill/
+
+# One-off local demos
+ai_image_ctr_dashboard_demo_v2.html

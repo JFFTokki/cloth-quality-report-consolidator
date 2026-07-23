@@ -1,0 +1,4 @@
+interface:
+  display_name: "质检报告汇总"
+  short_description: "批量读取全部质检报告并生成可追溯的分类总览与全项目明细"
+  default_prompt: "使用 $quality-report-consolidator 读取清单中的全部质检报告，生成货号基础/功能检测总览和逐项明细，并列出所有待复核与异常。"
