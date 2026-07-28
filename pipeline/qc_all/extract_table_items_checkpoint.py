@@ -1,4 +1,5 @@
 ﻿import argparse
+import hashlib
 import json
 import os
 import re
@@ -9,6 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path('tmp/vendor').resolve()))
 import pdfplumber
+from checkpoint_state import IDENTITY_FIELDS, attempt_status, choose_result, should_attempt
+from pipeline_versions import TABLE_PARSER_VERSION
 from qc_rules import to_simplified
 
 
@@ -29,6 +32,7 @@ ROOT = Path.cwd()
 WORK = Path(os.environ.get('QC_WORK_DIR', ROOT / 'pipeline/qc_all')).resolve()
 ROWS_PATH = WORK / 'table_items_rows.jsonl'
 STATE_PATH = WORK / 'table_items_state.json'
+RESULTS_DIR = WORK / 'table_items_results'
 source = json.loads((WORK / 'source_records.json').read_text(encoding='utf-8'))
 manifest = json.loads((WORK / 'download_manifest.json').read_text(encoding='utf-8'))
 pdf_text_docs = json.loads((WORK / 'pdf_text.json').read_text(encoding='utf-8'))
@@ -60,13 +64,112 @@ noise_patterns = [
 
 def load_state():
     if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text(encoding='utf-8'))
-    return {'processed_urls': [], 'stats': {}}
+        state = json.loads(STATE_PATH.read_text(encoding='utf-8'))
+        if 'url_states' not in state:
+            state['url_states'] = {
+                url: {'status': 'succeeded', 'attempts': 1, 'parser_version': ''}
+                for url in state.get('processed_urls', [])
+            }
+        return state
+    return {'processed_urls': [], 'url_states': {}, 'stats': {}}
 
 def save_state(state):
     tmp = STATE_PATH.with_suffix('.json.tmp')
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
     tmp.replace(STATE_PATH)
+
+def result_path(url):
+    return RESULTS_DIR / f"{hashlib.sha1(url.encode('utf-8')).hexdigest()}.json"
+
+def input_identity(manifest_row):
+    document = pdf_text.get(manifest_row.get('url')) or {}
+    return {
+        'pdf_sha256': manifest_row.get('sha256') or document.get('pdf_sha256') or '',
+        'text_extractor_version': document.get('text_extractor_version') or '',
+        'ocr_config_version': document.get('ocr_config_version') or '',
+        'header_parser_version': document.get('header_parser_version') or '',
+    }
+
+def load_pdf_result(url):
+    target = result_path(url)
+    if not target.exists():
+        return None
+    try:
+        return json.loads(target.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+def save_pdf_result(url, rows, status, stats, identity):
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    target = result_path(url)
+    candidate = {
+        'url': url,
+        'status': status,
+        'parser_version': TABLE_PARSER_VERSION,
+        **identity,
+        'stats': dict(stats),
+        'rows': rows,
+    }
+    previous = load_pdf_result(url)
+    if previous and (
+        previous.get('parser_version') != TABLE_PARSER_VERSION
+        or any(previous.get(field, '') != identity.get(field, '') for field in IDENTITY_FIELDS)
+    ):
+        previous = None
+    selected = choose_result(previous, candidate)
+    temp = target.with_suffix('.json.tmp')
+    temp.write_text(json.dumps(selected, ensure_ascii=False), encoding='utf-8')
+    temp.replace(target)
+    return selected
+
+def recover_result_states(url_states):
+    if not RESULTS_DIR.exists():
+        return
+    for path in RESULTS_DIR.glob('*.json'):
+        try:
+            payload = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            continue
+        url = payload.get('url')
+        if not url or payload.get('parser_version') != TABLE_PARSER_VERSION:
+            continue
+        current = url_states.get(url) or {}
+        url_states[url] = {
+            **current,
+            'status': payload.get('status', 'retryable_failed'),
+            'parser_version': TABLE_PARSER_VERSION,
+            **{field: payload.get(field, '') for field in IDENTITY_FIELDS},
+        }
+
+def aggregate_result_stats():
+    total = Counter()
+    if not RESULTS_DIR.exists():
+        return total
+    for path in RESULTS_DIR.glob('*.json'):
+        try:
+            payload = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get('parser_version') == TABLE_PARSER_VERSION:
+            total.update(payload.get('stats') or {})
+    return total
+
+def rebuild_rows_file():
+    temp = ROWS_PATH.with_suffix('.jsonl.tmp')
+    with temp.open('w', encoding='utf-8') as output:
+        if RESULTS_DIR.exists():
+            for path in sorted(RESULTS_DIR.glob('*.json')):
+                try:
+                    payload = json.loads(path.read_text(encoding='utf-8'))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if payload.get('parser_version') != TABLE_PARSER_VERSION:
+                    continue
+                if payload.get('status') not in {'succeeded', 'partial'}:
+                    continue
+                for row in payload.get('rows') or []:
+                    output.write(json.dumps(row, ensure_ascii=False) + '\n')
+    temp.replace(ROWS_PATH)
 
 def clean_cell(v):
     if v is None:
@@ -991,21 +1094,15 @@ def process_ocr_document(url):
     seen = set()
     for row in local_rows:
         key = (
-            row['item'], row['result'], row['report_no'], row['source_order_no'], row.get('sample_type', ''),
-            row['sku'], row['color'], row['page'],
+            row['item'], row['result'], row['report_no'], row['source_order_no'],
+            row.get('source_sheet', ''), row.get('source_row', ''), row.get('source_cell', ''),
+            row.get('sample_type', ''), row['sku'], row['color'], row['page'],
         )
         if key not in seen:
             seen.add(key)
             deduped.append(row)
     stats['ocr_rows'] += len(deduped)
     return deduped, stats
-
-def append_rows(rows):
-    if not rows:
-        return
-    with ROWS_PATH.open('a', encoding='utf-8') as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + '\n')
 
 def process_pdf(m):
     url = m['url']
@@ -1215,8 +1312,9 @@ def process_pdf(m):
         seen = set()
         for row in local_rows:
             key = (
-                row.get('item'), row.get('result'), row.get('verdict'), row.get('report_no'),
-                row.get('source_order_no'), row.get('sample_type'), row.get('sku'), row.get('color'), row.get('page'),
+                        row.get('item'), row.get('result'), row.get('verdict'), row.get('report_no'),
+                row.get('source_order_no'), row.get('source_sheet'), row.get('source_row'), row.get('source_cell'),
+                row.get('sample_type'), row.get('sku'), row.get('color'), row.get('page'),
             )
             if key in seen:
                 continue
@@ -1234,37 +1332,75 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--limit', type=int, default=300)
     parser.add_argument('--reset', action='store_true')
+    parser.add_argument('--retry-failed', action='store_true')
     args = parser.parse_args()
     if args.reset:
         ROWS_PATH.write_text('', encoding='utf-8')
-        save_state({'processed_urls': [], 'stats': {}})
+        if RESULTS_DIR.exists():
+            for path in RESULTS_DIR.glob('*.json'):
+                path.unlink()
+        save_state({'processed_urls': [], 'url_states': {}, 'stats': {}})
         print('reset checkpoint')
         return
     state = load_state()
-    processed = set(state.get('processed_urls', []))
-    stats_total = Counter(state.get('stats', {}))
-    pending = [m for m in manifest if m['url'] not in processed]
+    url_states = state.setdefault('url_states', {})
+    recover_result_states(url_states)
+    stats_total = aggregate_result_stats()
+    pending = [
+        m for m in manifest
+        if should_attempt(
+            url_states.get(m['url']),
+            parser_version=TABLE_PARSER_VERSION,
+            input_identity=input_identity(m),
+            retry_failed=args.retry_failed,
+        )
+    ]
     batch = pending[:args.limit]
     start = time.time()
     batch_stats = Counter()
     batch_rows = 0
     for idx, m in enumerate(batch, 1):
         rows, stats = process_pdf(m)
-        append_rows(rows)
-        batch_rows += len(rows)
+        status = attempt_status(stats, len(rows))
+        identity = input_identity(m)
+        saved_result = save_pdf_result(m['url'], rows, status, stats, identity)
+        saved_status = saved_result.get('status', status)
+        batch_rows += len(saved_result.get('rows') or [])
         batch_stats.update(stats)
-        stats_total.update(stats)
-        processed.add(m['url'])
+        stats_total = aggregate_result_stats()
+        previous_entry = url_states.get(m['url']) or {}
+        url_states[m['url']] = {
+            'status': saved_status,
+            'attempts': int(previous_entry.get('attempts') or 0) + 1,
+            'parser_version': TABLE_PARSER_VERSION,
+            **{field: saved_result.get(field, '') for field in IDENTITY_FIELDS},
+            'last_error': '; '.join(key for key in stats if str(key).startswith('pdf_error:')),
+        }
+        processed = sorted(
+            url for url, entry in url_states.items()
+            if entry.get('status') in {'succeeded', 'permanent_failed'}
+        )
+        state = {'processed_urls': processed, 'url_states': url_states, 'stats': dict(stats_total)}
+        save_state(state)
+        rebuild_rows_file()
         if idx % 25 == 0 or idx == len(batch):
-            state = {'processed_urls': sorted(processed), 'stats': dict(stats_total)}
-            save_state(state)
-            print(f"progress batch={idx}/{len(batch)} total={len(processed)}/{len(manifest)} rows_batch={batch_rows} rows_total={stats_total.get('rows',0)} elapsed={time.time()-start:.1f}s", flush=True)
-    state = {'processed_urls': sorted(processed), 'stats': dict(stats_total)}
+            print(f"progress batch={idx}/{len(batch)} terminal={len(processed)}/{len(manifest)} rows_batch={batch_rows} rows_total={stats_total.get('rows',0)} elapsed={time.time()-start:.1f}s", flush=True)
+    processed = sorted(
+        url for url, entry in url_states.items()
+        if entry.get('status') in {'succeeded', 'permanent_failed'}
+    )
+    state = {'processed_urls': processed, 'url_states': url_states, 'stats': dict(stats_total)}
     save_state(state)
+    rebuild_rows_file()
+    retryable = sum(
+        1 for entry in url_states.values()
+        if entry.get('status') in {'partial', 'retryable_failed'}
+    )
     print(json.dumps({
         'processed_total': len(processed),
         'manifest_total': len(manifest),
-        'remaining': len(manifest) - len(processed),
+        'remaining_unattempted': sum(1 for m in manifest if m['url'] not in url_states),
+        'retryable_or_partial': retryable,
         'batch_processed': len(batch),
         'batch_rows': batch_rows,
         'stats_total': dict(stats_total),

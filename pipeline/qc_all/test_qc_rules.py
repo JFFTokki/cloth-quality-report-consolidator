@@ -34,6 +34,20 @@ kept = prefer_specific_detail_rows([
 ])
 assert kept == [detail, other_report, other_sample, not_assessed, different_method], kept
 
+other_source_row = {
+    **summary,
+    "source_sheet": "Sheet1",
+    "source_row": 3,
+    "source_cell": "J3",
+}
+first_source_detail = {
+    **detail,
+    "source_sheet": "Sheet1",
+    "source_row": 2,
+    "source_cell": "J2",
+}
+assert prefer_specific_detail_rows([first_source_detail, other_source_row]) == [first_source_detail, other_source_row]
+
 assert international_certification("有", "未发现") == "是"
 assert international_certification("待复核", "有") == "是"
 assert international_certification("待复核", "未发现") == "否"

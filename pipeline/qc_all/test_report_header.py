@@ -150,14 +150,55 @@ def main():
     ) == ["125FB-UZ-801"]
     assert extract_same_line_labeled_values("版单号：A1 中文说明", [r"版单号"]) == ["A1"]
     assert extract_same_line_labeled_values("版单号：ABC 中文说明", [r"版单号"]) == ["ABC"]
-    assert extract_same_line_labeled_values("版单号：ABC- 中文说明", [r"版单号"]) == ["ABC-"]
-    assert extract_same_line_labeled_values("版单号：AB.12+CD(3)中文说明", [r"版单号"]) == ["AB.12+CD(3)"]
+    assert extract_same_line_labeled_values("版单号：ABC- 中文说明", [r"版单号"]) == ["ABC"]
+    assert extract_same_line_labeled_values("版单号：AB.12+CD(3)中文说明", [r"版单号"]) == ["AB"]
     assert extract_same_line_labeled_values("版单号：AB 12/3下一字段", [r"版单号"]) == ["AB12/3"]
     assert extract_same_line_labeled_values(
         "版单号：426FZ-BS-925 年/季度：2026/Q4 颜色：黄绿色调00334",
         [r"版单号"],
         stop_labels=(r"年/季度", r"颜色"),
     ) == ["426FZ-BS-925"]
+    invalid_date = extract_report_issue_date({
+        "pages": [{"page": 1, "text": "报告签发日期：2026-02-31"}],
+    })
+    assert invalid_date[0] == ""
+    assert invalid_date[1] == "待复核"
+    assert "非法日历日期" in invalid_date[4]
+    leap_date = extract_report_issue_date({
+        "pages": [{"page": 1, "text": "报告签发日期：2024-02-29"}],
+    })
+    assert leap_date[0:3] == ("2024-02-29", "已识别", "报告签发日期")
+    unrelated_invalid = extract_report_issue_date({
+        "pages": [{"page": 1, "text": "报告签发日期：2026-01-10；样品日期：2026-02-31"}],
+    })
+    assert unrelated_invalid[0:3] == ("2026-01-10", "已识别", "报告签发日期")
+    lower_priority_valid = extract_report_issue_date({
+        "pages": [{"page": 1, "text": "报告签发日期：2026-02-31；出具日期：2026-02-28"}],
+    })
+    assert lower_priority_valid[0:3] == ("2026-02-28", "已识别", "出具日期")
+    assert "已排除非法日期候选" in lower_priority_valid[4]
+    table_layout = extract_report_issue_date({
+        "pages": [{
+            "page": 1,
+            "text": "来样/检测开始日期 签发日期 委托检验 2024-11-25 2024-11-28 Test Type Date Issued",
+        }],
+    })
+    assert table_layout[0:3] == ("2024-11-28", "已识别", "报告签发日期")
+    later_page_valid = extract_report_issue_date({
+        "pages": [
+            {"page": 1, "text": "报告签发日期：2026-02-31"},
+            {"page": 2, "text": "报告签发日期：2026-02-28"},
+        ],
+    })
+    assert later_page_valid[0:3] == ("2026-02-28", "已识别", "报告签发日期")
+    production_date = extract_report_issue_date({
+        "pages": [{"page": 1, "text": "报告签发日期：2026-01-10；生产日期：2026-12-31"}],
+    })
+    assert production_date[0:3] == ("2026-01-10", "已识别", "报告签发日期")
+    print_date = extract_report_issue_date({
+        "pages": [{"page": 1, "text": "报告签发日期：2026-01-10 打印日期：2026-12-31"}],
+    })
+    assert print_date[0:3] == ("2026-01-10", "已识别", "报告签发日期")
     print(f"report header contract ok: min_y={HEADER_TOP_MIN_Y}, full_width_blocks={len(selected)}")
 
 

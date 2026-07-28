@@ -1,73 +1,92 @@
 ---
 name: quality-report-consolidator
-description: Batch-read quality inspection report lists from Excel, download or open every linked PDF, extract all test items and results across heterogeneous laboratory formats, classify basic versus functional textile tests, normalize parent and child test names, and generate a searchable product-code overview plus complete auditable detail workbook. Use for third-party inspection reports, quality report consolidation, product/SKU test coverage, PDF table extraction, and large batches requiring no-silent-omission QA.
+description: Coordinate and harden an adapter-backed workflow that consolidates Excel-listed quality inspection reports and linked PDFs into a traceable product overview and item-level audit workbook. Use for batch QC or laboratory report projects that need bounded TLS-verified PDF acquisition, native/OCR extraction adapters, metadata and test-item normalization, parent/child grouping, explicit exceptions, strict completeness validation, and non-overwriting Excel delivery across heterogeneous layouts.
 ---
 
 # Quality Report Consolidator
 
-Use the leader-version workflow as the controlling structure: process every report into two business sheets, split basic and functional tests, and never silently discard an unfamiliar layout. Use normalization, traceability, and exception rules only to strengthen that workflow.
+Build a traceable report pipeline, not a one-off workbook edit. Treat unknown layouts and missing reports as explicit states. Never claim completeness from a successful export alone.
 
-## Global preflight rule
+## Establish the contract
 
-Before every quality-report processing task, reread this section and follow it as the final processing logic. If a requested shortcut conflicts with this logic, surface the conflict before processing.
+Before processing, state:
 
-最终处理逻辑：
+1. scope: workbook, sheets, reporting period, product/SKU selection, and whether the output is preview or formal delivery;
+2. required source fields and report relationships;
+3. output directory, filename policy, and historical overwrite rule;
+4. platform capabilities for native PDF parsing, rendering, and OCR;
+5. business taxonomy overrides and unresolved decisions.
 
-1. 读取 Excel 全部工作表和表头，自动定位报告链接列。
-2. 拆分单元格中的多个 PDF 链接，保留来源行、货号、样品类型和判定。
-3. 下载并验证 PDF 完整性。
-4. 每份 PDF 逐页读取全文和表格；扫描件使用 OCR。
-5. 识别不同机构的表头、合并单元格、跨页表格和无重复表头页面。
-6. 提取货号、版单号、检测项目、方法、限值、实测结果、判定等全部字段。
-7. 将汇总页与同一报告的明细页匹配回填。
-8. 清除供应商、地址、日期、订单等非检测内容。
-9. 区分基础检测与功能性检测。
-10. 生成 `货号检测总览` 和 `质检全项目明细`。
-11. 自动检查下载失败、有结果无项目、疑似未解析结果及未知格式。
-12. 未知格式进入 `待复核`，不会静默遗漏。
+Inspect the target repository before choosing commands. If it already has a production pipeline, use it through the adapter contract in [references/adapter-contract.md](references/adapter-contract.md). Do not replace a proven parser with an ad-hoc script merely to make the workflow look generic.
 
-## Required workflow
+## Read references progressively
 
-1. Read the `Global preflight rule` above, then run `.venv/bin/python pipeline/qc_all/check_environment.py --smoke-ocr` from the project root. Stop before processing if any Python module, Node exporter dependency, Poppler command, Swift/macOS SDK component, PDF rendering smoke test, or Vision OCR smoke test fails. Never downgrade an environment failure into per-report `待复核` records.
-2. Read [references/workflow.md](references/workflow.md).
-3. Read [references/schema.md](references/schema.md) before creating records or the workbook.
-4. Read [references/classification.md](references/classification.md) before classifying tests.
-5. Use the bundled spreadsheet and PDF skills for `.xlsx` authoring and PDF visual verification.
-6. Inspect every input sheet and locate fields by header meaning. Never assume a fixed report-link column.
-7. Extract source metadata and every PDF URL. Split multiple URLs in one cell, and retain every source row and report even when a newer report exists.
-8. In this project, download PDFs with `.venv/bin/python pipeline/qc_all/download_pdfs.py`, which preserves the existing `source_records.json` and `download_manifest.json` contract; use `scripts/download_reports.mjs` only when the project pipeline files are not in scope. Cache successes and resume safely.
-9. Process every PDF page in this order: native grid table, no-grid text positioning, then OCR for scanned or insufficient text. Visually verify representative and uncertain pages.
-10. Extract report-level metadata once per PDF, including report issue date, issuing institution, and whether CMA/CNAS marks appear; inherit it to every record from that report. Metadata that is unavailable or uncertain must carry a visible status, reason, and evidence column in the workbook, not a silent blank. Normalize every detected result into the schema. Preserve original text, page, table, filename, URL, source row, report number, parser version, and rule version.
-11. Convert statistical names to simplified Chinese while retaining original wording. Normalize to a unified parent item; retain material, part, direction, condition, component, and specific substance as child items.
-12. Join overview/conclusion rows to detail-page values only within the same report. Mark joined values as derived from the detail page.
-13. Classify unified parent items as basic or functional. Keep uncertain parent assignments as `待确认归属` or `待复核`; do not put them into official overview item lists.
-14. Build exactly two business sheets by default:
-    - `货号检测总览`: one row per product code, separate basic and functional parent-item counts/lists;
-    - `质检全项目明细`: one row per normalized or audit record, including raw text and exception records.
-15. Run `scripts/validate_records.py` before export. Stop final delivery on validation failures or unresolved missing reports.
-16. Render both sheets, inspect key ranges, scan formula errors, and export a new `.xlsx` filename without overwriting historical output.
+- Read [references/adapter-contract.md](references/adapter-contract.md) when integrating an existing repository or defining stage inputs and outputs.
+- Read [references/workflow.md](references/workflow.md) before acquisition, PDF parsing, metadata recognition, or exception handling.
+- Read [references/schema.md](references/schema.md) before creating records or exporting a workbook.
+- Read [references/classification.md](references/classification.md) before classifying textile test parents; use a supplied company taxonomy first.
 
-## Non-negotiable safeguards
+## Process the source workbook
 
-- Treat different laboratories and page layouts as separate layout families.
-- Support merged cells, multi-line cells, repeated headers, and continuation pages without headers.
-- Do not infer a value that the PDF does not provide. Leave the value cell blank only when the paired status/reason column explains why, or use `待复核` when uncertain.
-- Put download failures, unreadable scans, encrypted or broken PDFs, OCR failures, unmatched headers, missing result columns, and unknown layouts into explicit exception records.
-- Keep raw text and source coordinates so every normalized value can be traced back.
-- Do not claim completeness when any report failed download, parsing, OCR, or validation.
-- Do not count customer information, suppliers, addresses, dates, standards descriptions, remarks, or order fields as test items.
-- Treat CMA/CNAS fields only as evidence that the corresponding mark appears in the report. Do not claim certificate validity or that a specific item is within the accredited scope without separate verification.
-- For report issue date, CMA, and CNAS, do not rely on text keywords alone. Use the evidence chain defined in `references/workflow.md`, and output explicit reasons for `未发现`, `待复核`, or blank values.
-- For a stylized CMA logo, accept degraded OCR such as `MA` or `MMA` only when a clear 12-digit qualification number is spatially aligned below it with valid coordinates and horizontal overlap. Normalize spacing and punctuation in the number; do not accept the degraded token or an unaligned number by itself.
-- Identify the issuing institution from legal-name content in OCR blocks, headers, footers, and repeated full-report text. Do not require an institution identity registry, and do not infer an institution from a report-number prefix or accreditation number alone.
-- Carry CAS numbers and detection/report limits from source tables through structured records and export. A defined workbook column must not be populated with a fixed blank placeholder.
-- Apply newer explicit human rules before older mapping seeds. Never repair only the final Excel; update the reusable rule source.
-- Keep all child semantics in detail. Use only a confidently unified parent item for overview counting and listing.
+Inspect every non-empty worksheet and identify business sheets by header meaning. Record ignored sheets and why they were excluded. Locate product code, color, sample type, source judgment, report number, last-modified metadata, and report links semantically.
 
-## Scale behavior
+Extract URLs from plain text, cell hyperlink targets, and `HYPERLINK()` formulas when the workbook library exposes them. Split every URL in a cell. Preserve one source relationship per workbook, sheet, row, cell, URL, product, color, and sample type. Generate a stable `sourceRelationshipId`; do not reduce relationships to the first `URL + product` match.
 
-Process reports in batches and cache downloaded PDFs plus extracted page JSON. Resume without reprocessing successful files. Record parser and rule versions in audit fields. For a newly observed layout, preserve its source page as `待复核`; add a layout rule only after comparing normalized rows with the rendered PDF page.
+## Acquire reports safely
 
-## Example invocation
+Allow only absolute `http` and `https` URLs. Verify TLS with system trust or an explicitly supplied CA file; never disable certificate validation. Apply timeouts, a maximum byte size, streaming download, temporary-file writes, atomic rename, HTTP status checks, `%PDF-` signature checks, and an actual PDF-open check before marking success.
 
-`使用 $quality-report-consolidator 读取这个Excel中的全部质检报告，以两张表输出货号基础/功能检测总览和全部检测项目明细，并列出所有待复核与异常。`
+Record original URL, final URL, byte size, SHA-256, local path, cache status, server validators when available, and exact failure reason. Use the bundled `scripts/download_reports.mjs` only as a generic acquisition fallback; the parsing stage must still verify that each file opens successfully.
+
+## Extract and normalize
+
+Convert complete native and OCR text from traditional Chinese to simplified Chinese before recognizing metadata, headers, items, results, or judgments. Preserve original text for audit.
+
+Process each page in this order:
+
+1. native grid tables;
+2. no-grid text positioning;
+3. OCR when native text is absent, insufficient, or visibly garbled.
+
+Extract report-level metadata once per PDF and inherit it to related records. Keep report number, issue date, institution, CMA, and CNAS evidence separate. Validate dates with a real calendar. Do not infer institutions or accreditation from report prefixes or numbers.
+
+Normalize each reliable result to a parent test item plus child context. Preserve material, part, direction, condition, component, analyte, method, limit, result, judgment, unit, CAS number, raw row, page, URL, source relationship, parser version, and rule version. Keep fragments and uncertain mappings out of official overview counts.
+
+## Resume without hiding failures
+
+Persist one atomic result per PDF. Use `succeeded`, `partial`, `retryable_failed`, and `permanent_failed`. Skip only successful or explicitly permanent outcomes. Keep partial and retryable outcomes eligible for an explicit retry.
+
+Invalidate a stage when its input hash or relevant parser, OCR, header, table, or mapping version changes. Rebuild aggregate JSON/JSONL from per-PDF results so a crash between result and state writes cannot duplicate business rows.
+
+## Validate before export
+
+Run the bundled validator against structured records and the download manifest:
+
+```bash
+python quality-report-consolidator/scripts/validate_records.py report_data.json --downloads download_manifest.json
+```
+
+Strict mode is the default. A required failed download must block formal delivery even when an exception row exists. Use `--allow-partial` only for a clearly labeled preview; `部分完成` is never formally deliverable.
+
+For formal workbook creation, use the fail-closed wrapper rather than calling the exporter directly:
+
+```bash
+QC_PYTHON=python3 node quality-report-consolidator/scripts/validate_and_export.mjs report_data.json download_manifest.json output.xlsx
+```
+
+The wrapper writes validation and export-diagnostic sidecars and runs the exporter only after `完整通过`. It refuses to overwrite any existing output. Formula errors or an unavailable/blank built-in preview block formal completion; the generated workbook is retained with an `external-review-required` filename for external visual inspection. Direct exporter invocation is an adapter/debug surface, not evidence of formal validation.
+
+Require a non-empty source relationship index, one stable ID per relationship, coverage of every relationship by a structured or exception record, at least one structured result, successful per-PDF process states, and report metadata for every successfully acquired PDF. Also require zero unexplained gaps for structured item names, overview eligibility, metadata evidence, CAS/detection-limit transfer, and formula errors. Reconcile unique PDF counts separately from source relationship counts.
+
+## Export and inspect
+
+Default to two business sheets:
+
+- `货号检测总览`: one row per product code, using only reliable parent items;
+- `质检全项目明细`: every structured result, review row, exception, and trace field.
+
+Create a new filename and preserve prior runs. Render and visually inspect both sheets. Reject blank or `1x1` preview placeholders as evidence. Keep the run manifest, versions, counts, validation output, workbook inspection, and known limitations beside the output.
+
+## Handle project-specific rules
+
+Keep quarter filters, source column aliases, laboratory layout rules, manual mapping workbooks, business classifications, and delivery naming in a project adapter or extension. Apply newer explicit human rules before older seeds. Change the reusable rule source and rerun; never repair only the final Excel.

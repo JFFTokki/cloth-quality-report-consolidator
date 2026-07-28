@@ -1,0 +1,5 @@
+TEXT_EXTRACTOR_VERSION = "text-extractor-v2"
+OCR_CONFIG_VERSION = "macos-vision-ocr-v2"
+HEADER_PARSER_VERSION = "report-header-v9"
+TABLE_PARSER_VERSION = "table-parser-v3"
+MAPPING_RULE_VERSION = "qc-mapping-r20260723"

@@ -2,6 +2,27 @@
 
 Use English internal keys shown in parentheses when generating JSON. Use the Chinese labels in the workbook.
 
+## Canonical envelope
+
+Use this versioned shape for portable adapters and bundled tools:
+
+```json
+{
+  "schemaVersion": "quality-report-consolidator/v1",
+  "sourceWorkbook": "source.xlsx",
+  "sourceRelationships": [],
+  "records": [],
+  "reportMetadataByUrl": {},
+  "pipelineVersions": {},
+  "traditionalToSimplifiedApplied": true,
+  "classificationDefault": "待分类"
+}
+```
+
+Project-specific legacy envelopes may be adapted at the boundary, but must not be described as the canonical schema.
+
+`traditionalToSimplifiedApplied=true` is an adapter assertion and must only be emitted when conversion ran before recognition and original text remains traceable. If it is absent, the exporter records that evidence was not supplied instead of claiming conversion occurred.
+
 ## First rule
 
 If any report text is traditional Chinese, convert the complete native/OCR text to simplified Chinese before recognizing metadata, headers, items, results, or judgments. Retain the original traditional text in source-row, page-text, or diagnostic evidence fields for audit.
@@ -60,6 +81,8 @@ If any report text is traditional Chinese, convert the complete native/OCR text 
 50. 处理状态 (`processStatus`)
 51. 来源工作表 (`sourceSheet`)
 52. 来源单元格 (`sourceCell`)
+53. 来源关系ID (`sourceRelationshipId`)
+54. 小类/业务子类 (`subcategory`)
 
 Recommended record types: `项目判定汇总`, `检测结果明细`, `补充检测结果`, `表级结论`, `表格说明`, `报告信息/表格原文`, `页面完整原文`, `待复核`, `异常`, `审计摘要`.
 
@@ -68,6 +91,7 @@ Use `mappingStatus` values `已确认`, `自动归并`, `自动新增`, `自动�
 Report-level field rules:
 
 - Extract `reportIssueDate`, `issuingInstitution`, `cmaMark`, and `cnasMark` once per PDF and inherit the same values to all records from that PDF.
+- Preserve `sourceRelationshipId` on every structured and exception record. Do not reconstruct it from the first row sharing a URL and product code.
 - Format a confirmed `reportIssueDate` as `yyyy-mm-dd`. Record the source label, original date text, page, and recognition evidence in `diagnostics`.
 - Populate `reportIssueDateStatus` with `已识别`, `未发现`, or `待复核`. Populate `reportIssueDateReason` for every blank or `待复核` date, and also include the selected label/page evidence for recognized dates.
 - Use `有`, `未发现`, or `待复核` for `cmaMark` and `cnasMark`. These values describe mark appearance in the report only, not certificate validity or accredited scope.

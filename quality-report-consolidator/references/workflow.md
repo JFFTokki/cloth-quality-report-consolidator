@@ -6,7 +6,7 @@ Convert the complete native and OCR report text from traditional Chinese to simp
 
 ## 0. Environment gate
 
-Run `.venv/bin/python pipeline/qc_all/check_environment.py --smoke-ocr` from the project root before selecting or downloading reports. The gate must verify the project Python modules, Node workbook exporter, Poppler `pdftoppm`/`pdfinfo`, Swift, a dynamically discovered macOS SDK, PDF-to-PNG rendering, and one actual Vision OCR invocation. Stop the batch on any failure and report the exact missing or failing component. Do not continue and convert a shared environment failure into hundreds of report-level `待复核` values.
+Run the target repository's environment check before selecting or downloading reports. Verify the chosen workbook library, PDF opener, native text/table extractor, renderer, OCR backend, exporter, and one real smoke operation for each required external component. Stop the batch on a shared environment failure; do not convert it into hundreds of report-level `待复核` rows.
 
 ## 1. Input workbook
 
@@ -15,13 +15,15 @@ Run `.venv/bin/python pipeline/qc_all/check_environment.py --smoke-ocr` from the
 - Treat column J only as a discovered source column, never as a fixed rule.
 - Split every URL from cells containing semicolons, newlines, spaces, or multiple hyperlinks.
 - Create one manifest row per source-row and report-URL relationship. Preserve the original sheet, row number, cell address, product code, color, sample type, and judgment.
+- Read plain-text URLs, cell hyperlink targets, and `HYPERLINK()` formulas when available. Record the link source type.
+- Generate a stable source relationship ID from workbook, sheet, row, cell, URL, product code, color, and sample type.
 - Keep all valid reports for the same product and color. Last-modified time is trace metadata or a sorting aid, not a reason to discard an older report.
 
 ## 2. Report acquisition
 
 - Download with bounded concurrency and stable filenames.
-- Verify HTTP success and `%PDF-` signature.
-- Record status, byte size, error, local path, source URL, and source relationship.
+- Verify TLS, HTTP success, maximum size, `%PDF-` signature, and actual PDF opening. Stream into a temporary file and rename atomically.
+- Record status, final URL, byte size, SHA-256, error, local path, source URL, and source relationship.
 - Reuse a successful cached file only when its URL and file signature still match.
 - Stop final delivery if any required report is missing; list every failure explicitly.
 

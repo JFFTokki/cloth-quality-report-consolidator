@@ -15,6 +15,7 @@ UNSPECIFIED_COLOR = "未标明颜色"
 VALID_SEASON = os.environ.get("QC_SEASON", "2026Q4")
 SELECTION_MODE = os.environ.get("QC_SOURCE_SELECTION", "all")
 INVALID_SUBCATEGORIES = {"", "#N/A", "小类"}
+SOURCE_WARNINGS = []
 EXCLUDE_SKUS_FILES = [
     value
     for name in ("QC_EXCLUDE_SKUS_FILE", "QC_EXCLUDE_SKUS_FILES")
@@ -73,6 +74,14 @@ def find_column(headers: list[str], logical_name: str, required: bool = True) ->
 def read_source_rows() -> tuple[list[dict], list[dict]]:
     wb = load_workbook(INPUT, read_only=True, data_only=True)
     ws = wb[wb.sheetnames[0]]
+    ignored_nonempty_sheets = [
+        sheet.title for sheet in wb.worksheets[1:]
+        if sheet.max_row > 1 or sheet.max_column > 1
+    ]
+    if ignored_nonempty_sheets:
+        SOURCE_WARNINGS.append(
+            f"当前项目源表适配器只读取首个工作表{ws.title}；已忽略非空辅助工作表：{', '.join(ignored_nonempty_sheets)}"
+        )
     source_sheet = ws.title
     rows_iter = ws.iter_rows(values_only=True)
     headers = [cell_text(value) for value in next(rows_iter)]
@@ -221,6 +230,7 @@ summary_keys = [
 
 payload = {
     "source_workbook": str(INPUT),
+    "source_warnings": SOURCE_WARNINGS,
     "season": VALID_SEASON,
     "selection_mode": SELECTION_MODE,
     "exclude_skus_files": EXCLUDE_SKUS_FILES,
@@ -236,6 +246,8 @@ payload = {
 }
 OUTPUT.parent.mkdir(parents=True, exist_ok=True)
 OUTPUT.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+for warning in SOURCE_WARNINGS:
+    print(f"WARNING: {warning}")
 print(
     json.dumps(
         {

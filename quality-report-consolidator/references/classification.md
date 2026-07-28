@@ -18,7 +18,7 @@ Match terms including:
 
 ## Basic tests
 
-Default a valid confirmed parent item to basic when it does not match a functional term. Typical examples:
+Classify a valid confirmed parent as basic when it matches the supplied company taxonomy or a reviewed conventional basic-test family. Do not silently force an unfamiliar new parent into basic merely because it misses the functional terms. Typical examples:
 
 - pH, 甲醛, 可分解致癌芳香胺, 邻苯二甲酸酯, 重金属;
 - 纤维含量, 成分定性, 羽绒成分测定;
@@ -32,6 +32,8 @@ Default a valid confirmed parent item to basic when it does not match a function
 Never classify supplier/company/address, brand, order quantity, product/style/plate number, sample stage/description, dates, report notes, judgment-basis prose, laboratory address, or execution-standard metadata as test items.
 
 Do not classify a row whose parent assignment is `待复核` or `解析残片`; retain it in detail and keep it out of overview counts.
+
+Use `待分类` for a reliable new parent whose basic/functional ownership is not yet defined. Use `其他` only when the taxonomy explicitly defines a non-basic, non-functional class.
 
 ## Overrides
 

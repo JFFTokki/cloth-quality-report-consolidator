@@ -13,6 +13,14 @@ from openpyxl.utils import get_column_letter
 import extract_table_items_checkpoint as extractor
 from qc_rules import prefer_specific_detail_rows, to_simplified
 from report_header import normalize_institution_display_value
+from source_relationship import source_relationship_id
+from pipeline_versions import (
+    HEADER_PARSER_VERSION,
+    MAPPING_RULE_VERSION,
+    OCR_CONFIG_VERSION,
+    TABLE_PARSER_VERSION,
+    TEXT_EXTRACTOR_VERSION,
+)
 
 
 ROOT = Path.cwd()
@@ -24,6 +32,7 @@ OUTPUT_PATH = Path(os.environ.get(
 )).resolve()
 
 source = json.loads((WORK / "source_records.json").read_text(encoding="utf-8"))
+SOURCE_WORKBOOK = source.get("source_workbook", "")
 manifest = json.loads((WORK / "download_manifest.json").read_text(encoding="utf-8"))
 pdf_docs = json.loads((WORK / "pdf_text.json").read_text(encoding="utf-8"))
 manifest_by_url = {row["url"]: row for row in manifest}
@@ -811,6 +820,16 @@ for index, url in enumerate(sample_urls, 1):
                 "cnasEvidence": (doc_by_url.get(url) or {}).get("cnas_evidence", ""),
             }, ensure_ascii=False, separators=(",", ":")),
         }
+        detail["source_relationship_id"] = source_relationship_id(
+            workbook=SOURCE_WORKBOOK,
+            sheet=detail["source_sheet"],
+            row=detail["source_row"],
+            cell=detail["source_cell"],
+            url=url,
+            sku=detail["sku"],
+            color=detail["color"],
+            sample_type=detail["sample_type"],
+        )
         detail_rows.append(detail)
     if index % 50 == 0 or index == len(sample_urls):
         print(f"progress pdf={index}/{len(sample_urls)} detail_rows={len(detail_rows)}", flush=True)
@@ -845,6 +864,7 @@ for detail in detail_rows:
     )
 
 for record in sample_records:
+    selected_colors = record.get("selected_colors") or ["未标明颜色"]
     for url in record.get("urls", []):
         if url not in sample_urls:
             continue
@@ -857,47 +877,62 @@ for record in sample_records:
             parsed_count,
         )
         metadata = extractor.processing_metadata(status, stats_by_url.get(url, {}), doc_by_url.get(url, {}))
-        if status not in {"已解析", "已解析（OCR）"}:
-            errors.append({
-                "type": status,
-                "reason_code": metadata["reason_code"],
-                "sku": record["sku"],
-                "subcategory": record.get("subcategory", ""),
-                "color": record.get("color_raw", "") or "未标明颜色",
-                "source_order_no": record.get("order_no", ""),
+        for source_color in selected_colors:
+            relationship_id = source_relationship_id(
+                workbook=SOURCE_WORKBOOK,
+                sheet=record.get("source_sheet", ""),
+                row=record.get("source_row", ""),
+                cell=record.get("source_cell", ""),
+                url=url,
+                sku=record.get("sku", ""),
+                color=source_color,
+                sample_type=record.get("sample_type", ""),
+            )
+            if status not in {"已解析", "已解析（OCR）"}:
+                errors.append({
+                    "type": status,
+                    "reason_code": metadata["reason_code"],
+                    "sku": record["sku"],
+                    "subcategory": record.get("subcategory", ""),
+                    "color": source_color,
+                    "source_order_no": record.get("order_no", ""),
+                    "source_sheet": record.get("source_sheet", ""),
+                    "source_row": record.get("source_row", ""),
+                    "source_cell": record.get("source_cell", ""),
+                    "source_relationship_id": relationship_id,
+                    "sample_type": record.get("sample_type", ""),
+                    "report_no": report_no(url),
+                    "url": url,
+                    "raw_item": "",
+                    "simple_item": "",
+                    "suggested_item": "",
+                    "page": "",
+                    "parse_method": metadata["parse_method"] or ("下载阶段" if status == "下载失败" else ""),
+                    "diagnostic_metrics": metadata["diagnostic_metrics"],
+                    "detail": reason,
+                })
+            source_index.append({
                 "source_sheet": record.get("source_sheet", ""),
                 "source_row": record.get("source_row", ""),
                 "source_cell": record.get("source_cell", ""),
-                "report_no": report_no(url),
+                "source_relationship_id": relationship_id,
+                "sku": record.get("sku", ""),
+                "subcategory": record.get("subcategory", ""),
+                "color_raw": record.get("color_raw", ""),
+                "color": source_color,
+                "order_no": record.get("order_no", ""),
+                "sample_type": record.get("sample_type", ""),
+                "overall_result": record.get("overall_result", ""),
+                "modified_time": record.get("modified_time", ""),
                 "url": url,
-                "raw_item": "",
-                "simple_item": "",
-                "suggested_item": "",
-                "page": "",
-                "parse_method": metadata["parse_method"] or ("下载阶段" if status == "下载失败" else ""),
-                "diagnostic_metrics": metadata["diagnostic_metrics"],
-                "detail": reason,
+                "selected": selected,
+                "selected_colors": source_color,
+                "parse_method": metadata["parse_method"],
+                "processing_status": status,
+                "reason_code": metadata["reason_code"],
+                "error_reason": reason,
+                "needs_review": metadata["needs_review"],
             })
-        source_index.append({
-            "source_sheet": record.get("source_sheet", ""),
-            "source_row": record.get("source_row", ""),
-            "source_cell": record.get("source_cell", ""),
-            "sku": record.get("sku", ""),
-            "subcategory": record.get("subcategory", ""),
-            "color_raw": record.get("color_raw", ""),
-            "order_no": record.get("order_no", ""),
-            "sample_type": record.get("sample_type", ""),
-            "overall_result": record.get("overall_result", ""),
-            "modified_time": record.get("modified_time", ""),
-            "url": url,
-            "selected": selected,
-            "selected_colors": "，".join(record.get("selected_colors", [])),
-            "parse_method": metadata["parse_method"],
-            "processing_status": status,
-            "reason_code": metadata["reason_code"],
-            "error_reason": reason,
-            "needs_review": metadata["needs_review"],
-        })
 
 include_all_invalid_records = os.environ.get("QC_INCLUDE_ALL_INVALID_RECORDS") == "1"
 invalid_records_for_scope = source.get("invalid_records", []) if include_all_invalid_records else [
@@ -909,46 +944,61 @@ for record in invalid_records_for_scope:
     urls = record.get("urls") or [""]
     reason = record.get("invalid_reason") or "无有效货号"
     for url in urls:
-        errors.append({
-            "type": reason,
-            "reason_code": "invalid_sku",
-            "sku": record.get("sku", ""),
-            "subcategory": record.get("subcategory", ""),
-            "color": record.get("color_raw", "") or "未标明颜色",
-            "source_order_no": record.get("order_no", ""),
-            "source_sheet": record.get("source_sheet", ""),
-            "source_row": record.get("source_row", ""),
-            "source_cell": record.get("source_cell", ""),
-            "report_no": report_no(url) if url else "",
-            "url": url,
-            "raw_item": "",
-            "simple_item": "",
-            "suggested_item": "",
-            "page": "",
-            "parse_method": "",
-            "diagnostic_metrics": f"source_row={record.get('source_row', '')}; colors={'，'.join(colors)}",
-            "detail": reason,
-        })
-        source_index.append({
-            "source_sheet": record.get("source_sheet", ""),
-            "source_row": record.get("source_row", ""),
-            "source_cell": record.get("source_cell", ""),
-            "sku": record.get("sku", ""),
-            "subcategory": record.get("subcategory", ""),
-            "color_raw": record.get("color_raw", ""),
-            "order_no": record.get("order_no", ""),
-            "sample_type": record.get("sample_type", ""),
-            "overall_result": record.get("overall_result", ""),
-            "modified_time": record.get("modified_time", ""),
-            "url": url,
-            "selected": "否",
-            "selected_colors": "",
-            "parse_method": "",
-            "processing_status": reason,
-            "reason_code": "invalid_sku",
-            "error_reason": reason,
-            "needs_review": "是",
-        })
+        for source_color in colors:
+            relationship_id = source_relationship_id(
+                workbook=SOURCE_WORKBOOK,
+                sheet=record.get("source_sheet", ""),
+                row=record.get("source_row", ""),
+                cell=record.get("source_cell", ""),
+                url=url,
+                sku=record.get("sku", ""),
+                color=source_color,
+                sample_type=record.get("sample_type", ""),
+            )
+            errors.append({
+                "type": reason,
+                "reason_code": "invalid_sku",
+                "sku": record.get("sku", ""),
+                "subcategory": record.get("subcategory", ""),
+                "color": source_color,
+                "source_order_no": record.get("order_no", ""),
+                "source_sheet": record.get("source_sheet", ""),
+                "source_row": record.get("source_row", ""),
+                "source_cell": record.get("source_cell", ""),
+                "source_relationship_id": relationship_id,
+                "sample_type": record.get("sample_type", ""),
+                "report_no": report_no(url) if url else "",
+                "url": url,
+                "raw_item": "",
+                "simple_item": "",
+                "suggested_item": "",
+                "page": "",
+                "parse_method": "",
+                "diagnostic_metrics": f"source_row={record.get('source_row', '')}; colors={'，'.join(colors)}",
+                "detail": reason,
+            })
+            source_index.append({
+                "source_sheet": record.get("source_sheet", ""),
+                "source_row": record.get("source_row", ""),
+                "source_cell": record.get("source_cell", ""),
+                "source_relationship_id": relationship_id,
+                "sku": record.get("sku", ""),
+                "subcategory": record.get("subcategory", ""),
+                "color_raw": record.get("color_raw", ""),
+                "color": source_color,
+                "order_no": record.get("order_no", ""),
+                "sample_type": record.get("sample_type", ""),
+                "overall_result": record.get("overall_result", ""),
+                "modified_time": record.get("modified_time", ""),
+                "url": url,
+                "selected": "否",
+                "selected_colors": "",
+                "parse_method": "",
+                "processing_status": reason,
+                "reason_code": "invalid_sku",
+                "error_reason": reason,
+                "needs_review": "是",
+            })
 
 summary_rows = []
 for key in source["summary_keys"]:
@@ -1051,6 +1101,17 @@ if os.environ.get("QC_LEGACY_XLSX") != "1":
             metadata["report_issue_date_reason"] = "待复核｜旧缓存未保留新版签发日期候选诊断，需重跑extract_text.py或人工复核首页"
         return metadata
     payload = {
+        "source_workbook": SOURCE_WORKBOOK,
+        "source_warnings": source.get("source_warnings", []),
+        "classification_default": "基础检测",
+        "traditional_to_simplified_applied": True,
+        "pipeline_versions": {
+            "text_extractor": TEXT_EXTRACTOR_VERSION,
+            "ocr_config": OCR_CONFIG_VERSION,
+            "report_header": HEADER_PARSER_VERSION,
+            "table_parser": TABLE_PARSER_VERSION,
+            "mapping_rules": MAPPING_RULE_VERSION,
+        },
         "sample_seed": source.get("sample_seed", ""),
         "sample_skus": sample_skus,
         "sample_records": len(sample_records),

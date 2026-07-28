@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "vendor"))
 import pdfplumber
 from PIL import Image
+from pipeline_versions import HEADER_PARSER_VERSION, OCR_CONFIG_VERSION, TEXT_EXTRACTOR_VERSION
 from qc_rules import simplify_document_text, simplify_ocr_blocks, to_simplified
 from report_header import (
     CODE_VALUE_PATTERN,
@@ -35,7 +36,6 @@ pdf_text_path = ROOT / "pdf_text.json"
 OCR_HELPER = Path(__file__).resolve().parent / "macos_vision_ocr.swift"
 OCR_ENABLED = os.environ.get("QC_ENABLE_OCR", "1") != "0"
 HEADER_OCR_ENABLED = os.environ.get("QC_ENABLE_HEADER_OCR", "1") != "0"
-HEADER_PARSER_VERSION = "report-header-v7"
 EXTRACT_WORKERS = max(1, int(os.environ.get("QC_EXTRACT_WORKERS", "1")))
 OCR_RUNTIME = inspect_ocr_environment(OCR_HELPER)
 if OCR_ENABLED and not OCR_RUNTIME["ready"]:
@@ -365,6 +365,14 @@ def save_documents():
 
 def process_manifest_row(row):
     cached_previous = previous.get(row["url"])
+    cache_versions_match = bool(
+        cached_previous
+        and cached_previous.get("pdf_sha256")
+        and cached_previous.get("pdf_sha256") == row.get("sha256")
+        and cached_previous.get("text_extractor_version") == TEXT_EXTRACTOR_VERSION
+        and cached_previous.get("ocr_config_version") == OCR_CONFIG_VERSION
+        and cached_previous.get("header_parser_version") == HEADER_PARSER_VERSION
+    )
     needs_ocr_refresh = bool(
         cached_previous and cached_previous.get("text_chars", 0) < 300 and OCR_ENABLED
         and (
@@ -372,7 +380,7 @@ def process_manifest_row(row):
             or bool(cached_previous.get("ocr_error"))
         )
     )
-    if cached_previous and row["status"] != "failed" and not needs_ocr_refresh:
+    if cached_previous and cache_versions_match and row["status"] != "failed" and not needs_ocr_refresh:
         cached = {**previous[row["url"]], **row, "extract_error": previous[row["url"]].get("extract_error", "")}
         simplify_document_text(cached)
         ensure_report_header(cached)
@@ -387,6 +395,9 @@ def process_manifest_row(row):
         **row, "pages": [], "text_chars": 0, "native_text_chars": 0,
         "report_no": "", "institution": "", "extract_error": "",
         "text_source": "native", "ocr_attempted": False, "ocr_text_chars": 0, "ocr_error": "",
+        "pdf_sha256": row.get("sha256", ""),
+        "text_extractor_version": TEXT_EXTRACTOR_VERSION,
+        "ocr_config_version": OCR_CONFIG_VERSION,
     }
     if row["status"] == "failed":
         return document, f"#{row['pdf_id']:04d} download_failed {document.get('error', '')}"

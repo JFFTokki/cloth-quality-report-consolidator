@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import crypto from "node:crypto";
+import { inflateSync } from "node:zlib";
 import { SpreadsheetFile, Workbook } from "@oai/artifact-tool";
 
 const [, , inputPath, outputPath] = process.argv;
@@ -7,10 +9,136 @@ if (!inputPath || !outputPath) {
   throw new Error("Usage: node export_leader_workbook.mjs report_data.json output.xlsx");
 }
 
+async function assertPathAbsent(filePath) {
+  try {
+    await fs.access(filePath);
+  } catch {
+    return;
+  }
+  throw new Error(`Refusing to overwrite existing output: ${filePath}`);
+}
+
+await assertPathAbsent(outputPath);
+await assertPathAbsent(outputPath.replace(/\.xlsx$/i, ".export.json"));
+await assertPathAbsent(outputPath.replace(/\.xlsx$/i, "_overview_preview.png"));
+await assertPathAbsent(outputPath.replace(/\.xlsx$/i, "_detail_preview.png"));
+
 const generatedAt = new Date().toISOString();
-const parserVersion = "pipeline/qc_all/build_100_sku_parent_child_report.py";
-const ruleVersion = "quality-report-consolidator-20260723-r10";
-const data = JSON.parse(await fs.readFile(inputPath, "utf8"));
+const rawData = JSON.parse(await fs.readFile(inputPath, "utf8"));
+
+function adaptCanonical(payload) {
+  if (payload.schemaVersion !== "quality-report-consolidator/v1") return payload;
+  const reportMetadataByUrl = Object.fromEntries(
+    Object.entries(payload.reportMetadataByUrl || {}).map(([url, row]) => [url, {
+      report_no: row.reportNumber || row.reportInternalId || "",
+      report_issue_date: row.reportIssueDate || "",
+      report_issue_date_status: row.reportIssueDateStatus || "",
+      report_issue_date_reason: row.reportIssueDateReason || "",
+      institution: row.issuingInstitution || "",
+      cma_mark: row.cmaMark || "",
+      cnas_mark: row.cnasMark || "",
+      cma_evidence: row.cmaRecognitionNote || "",
+      cnas_evidence: row.cnasRecognitionNote || "",
+      report_product_codes: row.reportProductCodes || [],
+      plate_numbers: row.plateNumbers || [],
+      material_numbers: row.materialNumbers || [],
+      path: row.localPath || "",
+    }]),
+  );
+  const sourceIndex = (payload.sourceRelationships || []).map((row) => ({
+    source_relationship_id: row.sourceRelationshipId || "",
+    source_sheet: row.sourceSheet || "",
+    source_row: row.sourceRow || "",
+    source_cell: row.sourceCell || "",
+    sku: row.sourceProductCode || "",
+    color: row.color || "",
+    order_no: row.sourceReportNumber || "",
+    sample_type: row.sampleType || "",
+    overall_result: row.sourceJudgment || "",
+    url: row.url || "",
+    processing_status: row.processStatus || "",
+  }));
+  const adaptedRows = (payload.records || []).map((row) => ({
+    record_id: row.recordId || "",
+    record_type: row.recordType || "检测结果明细",
+    source_relationship_id: row.sourceRelationshipId || "",
+    source_sheet: row.sourceSheet || "",
+    source_row: row.sourceRow || "",
+    source_cell: row.sourceCell || "",
+    sku: row.sourceProductCode || "",
+    subcategory: row.subcategory || "",
+    color: row.color || "",
+    source_order_no: row.sourceReportNumber || "",
+    sample_type: row.sampleType || "",
+    report_no: row.reportNumber || row.reportInternalId || "",
+    report_issue_date: row.reportIssueDate || "",
+    report_issue_date_status: row.reportIssueDateStatus || "",
+    report_issue_date_reason: row.reportIssueDateReason || "",
+    report_product_code: row.reportProductCode || "",
+    plate_number: row.plateNumber || "",
+    material_number: row.materialNumber || "",
+    institution: row.issuingInstitution || "",
+    cma_mark: row.cmaMark || "",
+    cnas_mark: row.cnasMark || "",
+    cma_recognition_note: row.cmaRecognitionNote || "",
+    cnas_recognition_note: row.cnasRecognitionNote || "",
+    raw_item: row.rawItem || "",
+    simple_item: row.simplifiedItem || "",
+    standard_item: row.parentItem || "",
+    subitem: row.childItem || "",
+    method: row.method || "",
+    requirement: row.requirement || "",
+    result: row.result || "",
+    verdict: row.judgment || "",
+    unit: row.unit || "",
+    cas_number: row.casNumber || "",
+    detection_limit: row.detectionLimit || "",
+    result_detail: row.note || "",
+    raw_row: row.rawRow || "",
+    page: row.pageNumber || "",
+    table: row.tableNumber || "",
+    item_number: row.itemNumber || "",
+    table_title: row.tableTitle || "",
+    status: row.mappingStatus || "",
+    merge_evidence: row.mappingEvidence || "",
+    include_horizontal: row.includeInOverview === true || row.includeInOverview === "是",
+    classification: row.classification || "",
+    local_path: row.localPath || "",
+    parser_version: row.parserVersion || "",
+    rule_version: row.ruleVersion || "",
+    processing_status: row.processStatus || "",
+    metadata_diagnostics: typeof row.diagnostics === "string" ? row.diagnostics : JSON.stringify(row.diagnostics || {}),
+    url: row.url || "",
+  }));
+  const detailRows = adaptedRows.filter((_, index) => !["异常", "待复核"].includes(payload.records[index]?.recordType));
+  const errors = adaptedRows
+    .map((row, index) => ({ row, original: payload.records[index] }))
+    .filter(({ original }) => ["异常", "待复核"].includes(original?.recordType))
+    .map(({ row, original }) => ({
+      ...row,
+      type: original.processStatus || original.recordType,
+      detail: original.note || original.diagnostics || "",
+      raw_item: original.rawItem || "",
+      simple_item: original.simplifiedItem || "",
+      suggested_item: original.parentItem || "",
+    }));
+  return {
+    ...payload,
+    source_workbook: payload.sourceWorkbook || "",
+    source_index: sourceIndex,
+    detail_rows: detailRows,
+    errors,
+    sample_skus: [...new Set(adaptedRows.map((row) => row.sku).filter(Boolean))],
+    sample_urls: [...new Set(adaptedRows.map((row) => row.url).filter(Boolean))],
+    report_metadata_by_url: reportMetadataByUrl,
+    pipeline_versions: payload.pipelineVersions || {},
+    classification_default: payload.classificationDefault || "待分类",
+  };
+}
+
+const data = adaptCanonical(rawData);
+const parserVersion = Object.entries(data.pipeline_versions || {}).map(([key, value]) => `${key}=${value}`).join(";") || "project-adapter-unspecified";
+const ruleVersion = data.pipeline_versions?.mapping_rules || data.rule_version || data.ruleVersion || "rule-unspecified";
 
 const functionalTerms = [
   "远红外", "红外升温", "吸湿发热", "发热", "升温", "保温", "蓄热", "暖感",
@@ -29,8 +157,8 @@ function compactText(value) {
 function cleanPlateNumbers(value) {
   const cleaned = [];
   for (const line of compactText(value).split(/\n+/)) {
-    const beforeChinese = line.match(/^[^\u3400-\u9fff]*/u)?.[0] ?? "";
-    const plateNumber = beforeChinese.replace(/\s+/g, "");
+    const compact = line.replace(/\s+/g, "");
+    const plateNumber = compact.match(/^[A-Za-z0-9]+(?:[-/_][A-Za-z0-9]+)*/)?.[0] ?? "";
     if (/[A-Za-z0-9]/.test(plateNumber) && !cleaned.includes(plateNumber)) cleaned.push(plateNumber);
   }
   return cleaned.join("\n");
@@ -65,9 +193,15 @@ function normalizedJudgment(values) {
   return "";
 }
 
-function classify(parentItem, mappingStatus) {
+function classify(parentItem, mappingStatus, explicitClassification = "") {
   if (!parentItem || ["待确认归属", "待复核", "解析残片"].includes(mappingStatus)) return "";
-  return functionalTerms.some((term) => parentItem.includes(term)) ? "功能性检测" : "基础检测";
+  if (["基础检测", "功能性检测", "其他", "待分类"].includes(explicitClassification)) return explicitClassification;
+  if (functionalTerms.some((term) => parentItem.includes(term))) return "功能性检测";
+  return data.classification_default || "待分类";
+}
+
+function reviewRequired(mappingStatus) {
+  return ["待确认归属", "待复核", "解析残片", "自动归入父项（子项类型未完全识别）"].includes(mappingStatus);
 }
 
 function localFileName(url) {
@@ -92,9 +226,11 @@ function normalizeItemList(values) {
 
 const sourceRowsByUrlSku = new Map();
 const sourceRowsByUrl = new Map();
+const sourceRowsByRelationshipId = new Map();
 for (const row of data.source_index || []) {
   const url = compactText(row.url);
   const sku = compactText(row.sku);
+  if (row.source_relationship_id) sourceRowsByRelationshipId.set(compactText(row.source_relationship_id), row);
   if (!url) continue;
   const rowList = sourceRowsByUrl.get(url) || [];
   rowList.push(row);
@@ -107,8 +243,48 @@ for (const row of data.source_index || []) {
   }
 }
 
-function sourceFor(url, sku) {
-  return (sourceRowsByUrlSku.get(`${compactText(url)}\u0000${compactText(sku)}`) || sourceRowsByUrl.get(compactText(url)) || [])[0] || {};
+function relationshipId(row) {
+  if (row.source_relationship_id) return compactText(row.source_relationship_id);
+  const values = [data.source_workbook || "", row.source_sheet, row.source_row, row.source_cell, row.url, row.sku, row.color, row.sample_type];
+  if (!values.some((value) => compactText(value))) return "";
+  return `src-${crypto.createHash("sha256").update(values.map(compactText).join("\u001f")).digest("hex").slice(0, 20)}`;
+}
+
+function sourceFor(row) {
+  const requestedRelationshipId = relationshipId(row);
+  const relationshipSource = sourceRowsByRelationshipId.get(requestedRelationshipId);
+  if (row.source_relationship_id && !relationshipSource) {
+    throw new Error(`Unknown source_relationship_id: ${row.source_relationship_id}`);
+  }
+  const candidates = sourceRowsByUrlSku.get(`${compactText(row.url)}\u0000${compactText(row.sku)}`) || sourceRowsByUrl.get(compactText(row.url)) || [];
+  const exactCandidates = candidates.filter((candidate) => {
+    const comparisons = [
+      [row.source_sheet, candidate.source_sheet],
+      [row.source_row, candidate.source_row],
+      [row.source_cell, candidate.source_cell],
+      [row.sample_type, candidate.sample_type],
+    ].filter(([expected]) => compactText(expected));
+    const candidateColors = compactText(candidate.color || candidate.selected_colors).split(/[，,\n]/).filter(Boolean);
+    const colorMatches = !compactText(row.color) || candidateColors.length === 0 || candidateColors.includes(compactText(row.color));
+    return colorMatches && comparisons.every(([expected, actual]) => compactText(expected) === compactText(actual));
+  });
+  const resolved = relationshipSource || (exactCandidates.length === 1 ? exactCandidates[0] : candidates.length === 1 ? candidates[0] : null);
+  if (!resolved && candidates.length > 1) {
+    throw new Error(`Ambiguous source relationship for URL=${compactText(row.url)} SKU=${compactText(row.sku)}`);
+  }
+  const fallback = resolved || {};
+  return {
+    ...fallback,
+    source_relationship_id: row.source_relationship_id || fallback.source_relationship_id || "",
+    source_sheet: row.source_sheet || fallback.source_sheet || "",
+    source_row: row.source_row || fallback.source_row || "",
+    source_cell: row.source_cell || fallback.source_cell || "",
+    url: row.url || fallback.url || "",
+    sku: row.sku || fallback.sku || "",
+    color: row.color || fallback.color || "",
+    sample_type: row.sample_type || fallback.sample_type || "",
+    order_no: row.source_order_no || fallback.order_no || "",
+  };
 }
 
 const reportIndexByUrl = new Map();
@@ -130,7 +306,26 @@ function joinedMetadata(meta, key) {
 function excelDate(value) {
   const match = /^(20\d{2})-(\d{2})-(\d{2})$/.exec(compactText(value));
   if (!match) return compactText(value);
-  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) return "";
+  return parsed;
+}
+
+function dateFields(row, meta) {
+  const raw = compactText(row.report_issue_date || meta.report_issue_date);
+  const parsed = excelDate(raw);
+  const valid = parsed instanceof Date;
+  if (raw && !valid) {
+    const priorReason = compactText(row.report_issue_date_reason || meta.report_issue_date_reason);
+    const reason = `待复核｜非法日历日期：${raw}${priorReason ? `；原识别信息：${priorReason}` : ""}`;
+    return { value: "", status: "待复核", reason };
+  }
+  const status = row.report_issue_date_status || meta.report_issue_date_status || (valid ? "已识别" : raw ? "待复核" : "未发现");
+  const reason = row.report_issue_date_reason || meta.report_issue_date_reason || "";
+  return { value: valid ? parsed : "", status, reason };
 }
 
 function excelColumnName(index) {
@@ -154,12 +349,12 @@ const detailHeaders = [
   "简体检测项目", "归并状态", "归并证据",
   "报告签发日期识别状态", "报告签发日期异常原因", "CMA识别证据/异常原因", "CNAS识别证据/异常原因",
   "是否进入总览", "检测分类", "本地PDF路径", "解析器版本", "规则版本", "诊断信息",
-  "处理状态", "来源工作表", "来源单元格",
+  "处理状态", "来源关系ID", "来源工作表", "来源单元格",
 ];
 
 const grayAddedDetailHeaders = new Set([
   "报告签发日期识别状态", "报告签发日期异常原因", "CMA识别证据/异常原因", "CNAS识别证据/异常原因",
-  "处理状态", "来源工作表", "来源单元格", "简体检测项目", "归并状态", "归并证据",
+  "处理状态", "来源关系ID", "来源工作表", "来源单元格", "简体检测项目", "归并状态", "归并证据",
   "是否进入总览", "检测分类", "本地PDF路径", "解析器版本", "规则版本", "诊断信息",
 ]);
 
@@ -190,7 +385,7 @@ function ensureSku(sku) {
 }
 
 function pushDetail(row, overrides = {}) {
-  const source = sourceFor(row.url, row.sku);
+  const source = sourceFor(row);
   const meta = reportMetadata(row.url);
   const internalId = reportInternalId(row.report_no || meta.report_no, row.url);
   const reportProductCode = compactText(row.report_product_code) || joinedMetadata(meta, "report_product_codes");
@@ -199,9 +394,10 @@ function pushDetail(row, overrides = {}) {
   const parentItem = compactText(row.standard_item);
   const mappingStatus = compactText(row.status);
   const includeInOverview = Boolean(row.include_horizontal) && !["待确认归属", "待复核", "解析残片"].includes(mappingStatus);
-  const classification = classify(parentItem, mappingStatus);
+  const classification = classify(parentItem, mappingStatus, compactText(row.classification));
   const cmaMark = row.cma_mark || meta.cma_mark || "";
   const cnasMark = row.cnas_mark || meta.cnas_mark || "";
+  const reportDate = dateFields(row, meta);
 
   const metadataDiagnostics = row.metadata_diagnostics || JSON.stringify({
     reportIssueDateLabel: meta.report_issue_date_label || "",
@@ -211,9 +407,10 @@ function pushDetail(row, overrides = {}) {
     cnasEvidence: meta.cnas_evidence || "",
   });
   const detailRecord = {
-    "记录ID": detailRows.length + 1,
-    "记录类型": overrides.recordType || "检测结果明细",
-    "处理状态": source.processing_status || "",
+    "记录ID": row.record_id || detailRows.length + 1,
+    "记录类型": overrides.recordType || row.record_type || "检测结果明细",
+    "处理状态": row.processing_status || source.processing_status || "",
+    "来源关系ID": relationshipId(source),
     "来源工作表": source.source_sheet || "",
     "来源表行": source.source_row || "",
     "来源单元格": source.source_cell || "",
@@ -223,9 +420,9 @@ function pushDetail(row, overrides = {}) {
     "报告内编号": internalId,
     "来源货号/款号": row.sku || "",
     "小类": row.subcategory || source.subcategory || "",
-    "报告签发日期": excelDate(row.report_issue_date || meta.report_issue_date),
-    "报告签发日期识别状态": row.report_issue_date_status || meta.report_issue_date_status || (row.report_issue_date || meta.report_issue_date ? "已识别" : "未发现"),
-    "报告签发日期异常原因": row.report_issue_date_reason || meta.report_issue_date_reason || "",
+    "报告签发日期": reportDate.value,
+    "报告签发日期识别状态": reportDate.status,
+    "报告签发日期异常原因": reportDate.reason,
     "报告内货号/款号": reportProductCode,
     "颜色": row.color || "",
     "报告内版单号": plateNumbers,
@@ -260,9 +457,9 @@ function pushDetail(row, overrides = {}) {
     "归并证据": row.merge_evidence || overrides.mappingEvidence || "",
     "是否进入总览": includeInOverview ? "是" : "否",
     "检测分类": classification,
-    "本地PDF路径": meta.path || "",
-    "解析器版本": parserVersion,
-    "规则版本": ruleVersion,
+    "本地PDF路径": row.local_path || meta.path || "",
+    "解析器版本": row.parser_version || parserVersion,
+    "规则版本": row.rule_version || ruleVersion,
     "诊断信息": overrides.diagnostics || JSON.stringify({
       metadata: JSON.parse(metadataDiagnostics || "{}"),
       mergeConfidence: row.merge_confidence ?? "",
@@ -274,12 +471,12 @@ function pushDetail(row, overrides = {}) {
 
 for (const row of data.detail_rows || []) {
   const skuAgg = ensureSku(row.sku);
-  const source = sourceFor(row.url, row.sku);
+  const source = sourceFor(row);
   if (row.subcategory || source.subcategory) skuAgg.subcategories.add(row.subcategory || source.subcategory);
   const parentItem = compactText(row.standard_item);
   const mappingStatus = compactText(row.status);
   const includeInOverview = Boolean(row.include_horizontal) && !["待确认归属", "待复核", "解析残片"].includes(mappingStatus);
-  const classification = classify(parentItem, mappingStatus);
+  const classification = classify(parentItem, mappingStatus, compactText(row.classification));
 
   if (includeInOverview && parentItem) {
     skuAgg.parents.add(parentItem);
@@ -299,14 +496,14 @@ for (const row of data.detail_rows || []) {
   if (row.source_order_no || source.order_no) skuAgg.sourceReportNos.add(row.source_order_no || source.order_no);
   if (source.sample_type) skuAgg.sampleTypes.add(source.sample_type);
   if (source.overall_result) skuAgg.judgments.push(source.overall_result);
-  if (!includeInOverview && ["待确认归属", "解析残片"].includes(mappingStatus)) skuAgg.pending += 1;
+  if (reviewRequired(mappingStatus)) skuAgg.pending += 1;
 
   pushDetail(row);
 }
 
 for (const error of data.errors || []) {
   const skuAgg = ensureSku(error.sku);
-  const source = sourceFor(error.url, error.sku);
+  const source = sourceFor(error);
   if (error.subcategory || source.subcategory) skuAgg.subcategories.add(error.subcategory || source.subcategory);
   if (error.url) {
     skuAgg.urls.add(error.url);
@@ -319,10 +516,18 @@ for (const error of data.errors || []) {
   if (source.overall_result) skuAgg.judgments.push(source.overall_result);
 
   pushDetail({
+    record_id: error.record_id || "",
+    record_type: error.record_type || "异常",
+    processing_status: error.processing_status || "",
     sku: error.sku || "",
     subcategory: error.subcategory || source.subcategory || "",
     color: error.color || "",
     source_order_no: error.source_order_no || "",
+    source_relationship_id: error.source_relationship_id || "",
+    source_sheet: error.source_sheet || "",
+    source_row: error.source_row || "",
+    source_cell: error.source_cell || "",
+    sample_type: error.sample_type || "",
     report_no: error.report_no || "",
     raw_item: error.raw_item || "",
     simple_item: error.simple_item || "",
@@ -337,9 +542,12 @@ for (const error of data.errors || []) {
     page: error.page || "",
     status: "待复核",
     include_horizontal: false,
+    local_path: error.local_path || "",
+    parser_version: error.parser_version || "",
+    rule_version: error.rule_version || "",
     url: error.url || "",
   }, {
-    recordType: "异常",
+    recordType: error.record_type || "异常",
     note: error.detail || "",
     mappingStatus: "待复核",
     mappingEvidence: error.detail || "",
@@ -388,12 +596,16 @@ const overviewRows = [...rowsBySku.values()]
     row.errorUrls.size,
   ]);
 
+const simplificationVerified = data.traditional_to_simplified_applied === true || data.traditionalToSimplifiedApplied === true;
+const simplificationAuditText = simplificationVerified
+  ? "适配器声明已执行繁体转简体识别并保留原文。"
+  : "适配器未提供繁体转简体处理完成证据。";
 const auditRecord = {
   "记录ID": detailRows.length + 1,
   "记录类型": "审计摘要",
   "项目序号": "导出摘要",
   "备注": `generatedAt=${generatedAt}`,
-  "项目原始行/页面完整原文": "领导版两表导出；繁体先转简体识别并保留原文；报告级元数据诊断列统一置于AM列之后。",
+  "项目原始行/页面完整原文": `领导版两表导出；${simplificationAuditText}报告级元数据诊断列统一置于AM列之后。`,
   "是否有国际认证": "否",
   "是否进入总览": "否",
   "解析器版本": parserVersion,
@@ -547,7 +759,7 @@ writeSheet(detailSheet, detailHeaders, detailRows, {
   preRows: [
     [`质检报告全项目明细库｜${data.sample_urls?.length ?? 0}份报告`, ...Array(detailHeaders.length - 1).fill("")],
     ["报告数量", data.sample_urls?.length ?? 0, "", "结构化项目行", data.detail_rows?.length ?? 0, "", "异常记录", data.errors?.length ?? 0, "", "总记录数", detailRows.length, ...Array(detailHeaders.length - 11).fill("")],
-    ["使用说明：报告繁体文字先转为简体再识别，原文保留追溯；统一检测父项、标准检测子项紧跟检测项目；国际认证列位于CMA/CNAS标识之前；四个报告级识别诊断灰列统一置于AM列之后。", ...Array(detailHeaders.length - 1).fill("")],
+    [`使用说明：${simplificationAuditText}统一检测父项、标准检测子项紧跟检测项目；国际认证列位于CMA/CNAS标识之前；四个报告级识别诊断灰列统一置于AM列之后。`, ...Array(detailHeaders.length - 1).fill("")],
     Array(detailHeaders.length).fill(""),
   ],
   widths: Object.fromEntries(detailHeaders.map((header, index) => [index, ({
@@ -603,35 +815,135 @@ const errorScan = await workbook.inspect({
   maxChars: 4000,
 });
 console.log(errorScan.ndjson);
+const formulaErrorCount = compactText(errorScan.ndjson).split(/\n+/).filter(Boolean).length;
 
 await fs.mkdir(path.dirname(outputPath), { recursive: true });
 const output = await SpreadsheetFile.exportXlsx(workbook);
 await output.save(outputPath);
 
-function pngDimensions(bytes) {
+function paethPredictor(left, above, upperLeft) {
+  const estimate = left + above - upperLeft;
+  const leftDistance = Math.abs(estimate - left);
+  const aboveDistance = Math.abs(estimate - above);
+  const upperLeftDistance = Math.abs(estimate - upperLeft);
+  if (leftDistance <= aboveDistance && leftDistance <= upperLeftDistance) return left;
+  if (aboveDistance <= upperLeftDistance) return above;
+  return upperLeft;
+}
+
+function inspectPng(bytes) {
   if (bytes.length < 24 || bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4e || bytes[3] !== 0x47) {
-    return { width: 0, height: 0 };
+    return { width: 0, height: 0, contentDetected: false, nonWhiteSamples: 0 };
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return { width: view.getUint32(16), height: view.getUint32(20) };
+  const width = view.getUint32(16);
+  const height = view.getUint32(20);
+  const bitDepth = bytes[24];
+  const colorType = bytes[25];
+  const interlace = bytes[28];
+  const channels = ({ 0: 1, 2: 3, 4: 2, 6: 4 })[colorType] || 0;
+  if (width <= 1 || height <= 1) {
+    return { width, height, contentDetected: false, nonWhiteSamples: 0 };
+  }
+  if (!width || !height || bitDepth !== 8 || !channels || interlace !== 0) {
+    return { width, height, contentDetected: false, nonWhiteSamples: 0 };
+  }
+
+  const idatChunks = [];
+  let offset = 8;
+  while (offset + 12 <= bytes.length) {
+    const length = view.getUint32(offset);
+    const type = String.fromCharCode(...bytes.slice(offset + 4, offset + 8));
+    if (offset + 12 + length > bytes.length) break;
+    if (type === "IDAT") idatChunks.push(Buffer.from(bytes.slice(offset + 8, offset + 8 + length)));
+    offset += 12 + length;
+    if (type === "IEND") break;
+  }
+  if (!idatChunks.length) return { width, height, contentDetected: false, nonWhiteSamples: 0 };
+
+  let inflated;
+  try {
+    inflated = inflateSync(Buffer.concat(idatChunks));
+  } catch {
+    return { width, height, contentDetected: false, nonWhiteSamples: 0 };
+  }
+  const rowBytes = width * channels;
+  if (inflated.length < height * (rowBytes + 1)) {
+    return { width, height, contentDetected: false, nonWhiteSamples: 0 };
+  }
+
+  let prior = new Uint8Array(rowBytes);
+  let sourceOffset = 0;
+  let sampledPixels = 0;
+  let nonWhiteSamples = 0;
+  const sampleEvery = Math.max(1, Math.floor((width * height) / 200000));
+  const requiredSamples = Math.max(1, Math.min(10, Math.floor((width * height) / sampleEvery / 1000)));
+  for (let y = 0; y < height; y += 1) {
+    const filter = inflated[sourceOffset];
+    sourceOffset += 1;
+    const row = new Uint8Array(rowBytes);
+    for (let index = 0; index < rowBytes; index += 1) {
+      const raw = inflated[sourceOffset + index];
+      const left = index >= channels ? row[index - channels] : 0;
+      const above = prior[index] || 0;
+      const upperLeft = index >= channels ? prior[index - channels] : 0;
+      let value = raw;
+      if (filter === 1) value += left;
+      else if (filter === 2) value += above;
+      else if (filter === 3) value += Math.floor((left + above) / 2);
+      else if (filter === 4) value += paethPredictor(left, above, upperLeft);
+      else if (filter !== 0) return { width, height, contentDetected: false, nonWhiteSamples: 0 };
+      row[index] = value & 0xff;
+    }
+    sourceOffset += rowBytes;
+    for (let x = 0; x < width; x += 1) {
+      const pixelNumber = y * width + x;
+      if (pixelNumber % sampleEvery !== 0) continue;
+      const pixelOffset = x * channels;
+      const gray = row[pixelOffset];
+      const red = colorType === 0 || colorType === 4 ? gray : row[pixelOffset];
+      const green = colorType === 0 || colorType === 4 ? gray : row[pixelOffset + 1];
+      const blue = colorType === 0 || colorType === 4 ? gray : row[pixelOffset + 2];
+      const alpha = colorType === 4 ? row[pixelOffset + 1] : colorType === 6 ? row[pixelOffset + 3] : 255;
+      sampledPixels += 1;
+      if (alpha > 16 && (red < 245 || green < 245 || blue < 245)) nonWhiteSamples += 1;
+      if (nonWhiteSamples >= requiredSamples) {
+        return { width, height, contentDetected: true, nonWhiteSamples, sampledPixels };
+      }
+    }
+    prior = row;
+  }
+  return { width, height, contentDetected: false, nonWhiteSamples, sampledPixels };
 }
 
 const previewDiagnostics = {};
 const overviewPreview = await workbook.render({ sheetName: "货号检测总览", range: `A1:${overviewLastColumn}24`, scale: 1, format: "png" });
 const overviewPreviewBytes = new Uint8Array(await overviewPreview.arrayBuffer());
-previewDiagnostics.overview = pngDimensions(overviewPreviewBytes);
-if (previewDiagnostics.overview.width > 1 && previewDiagnostics.overview.height > 1) {
+previewDiagnostics.overview = inspectPng(overviewPreviewBytes);
+if (previewDiagnostics.overview.contentDetected) {
   await fs.writeFile(outputPath.replace(/\.xlsx$/i, "_overview_preview.png"), overviewPreviewBytes);
 }
 const detailPreview = await workbook.render({ sheetName: "质检全项目明细", range: `A1:${detailLastColumn}24`, scale: 1, format: "png" });
 const detailPreviewBytes = new Uint8Array(await detailPreview.arrayBuffer());
-previewDiagnostics.detail = pngDimensions(detailPreviewBytes);
-if (previewDiagnostics.detail.width > 1 && previewDiagnostics.detail.height > 1) {
+previewDiagnostics.detail = inspectPng(detailPreviewBytes);
+if (previewDiagnostics.detail.contentDetected) {
   await fs.writeFile(outputPath.replace(/\.xlsx$/i, "_detail_preview.png"), detailPreviewBytes);
 }
-if (Object.values(previewDiagnostics).some(({ width, height }) => width <= 1 || height <= 1)) {
-  console.warn(JSON.stringify({ visualPreviewStatus: "external_review_required", previewDiagnostics }));
-}
+const visualPreviewStatus = Object.values(previewDiagnostics).some(({ contentDetected }) => !contentDetected)
+  ? "external_review_required"
+  : "passed";
+const exportDiagnostics = {
+  output: outputPath,
+  formulaErrorCount,
+  visualPreviewStatus,
+  previewDiagnostics,
+};
+await fs.writeFile(
+  outputPath.replace(/\.xlsx$/i, ".export.json"),
+  `${JSON.stringify(exportDiagnostics, null, 2)}\n`,
+  { flag: "wx" },
+);
+if (visualPreviewStatus !== "passed") console.warn(JSON.stringify(exportDiagnostics));
 
 console.log(JSON.stringify({
   output: outputPath,
@@ -642,5 +954,7 @@ console.log(JSON.stringify({
   samplePdfs: data.sample_urls?.length ?? 0,
   structuredRows: data.detail_rows?.length ?? 0,
   exceptions: data.errors?.length ?? 0,
+  formulaErrorCount,
+  visualPreviewStatus,
   previewDiagnostics,
 }, null, 2));

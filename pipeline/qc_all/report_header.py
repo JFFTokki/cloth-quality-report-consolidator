@@ -1,4 +1,5 @@
 import re
+from datetime import date
 
 
 HEADER_TOP_MIN_Y = 0.68
@@ -275,8 +276,11 @@ def extract_same_line_labeled_values(text: str, labels, stop_labels=()):
             if stop_pattern:
                 value = re.split(rf"\s*(?:{stop_pattern})\s*[：:]?", value, maxsplit=1)[0]
             value = re.sub(r"\s+", "", value)
-            if re.search(r"[A-Za-z0-9]", value) and value not in values:
-                values.append(value)
+            match_value = re.match(CODE_VALUE_PATTERN, value)
+            if match_value:
+                normalized = re.sub(r"\s+", "", match_value.group(0))
+                if normalized not in values:
+                    values.append(normalized)
     return values
 
 
@@ -293,7 +297,9 @@ def normalize_date(value: str) -> str:
     year = int(re.sub(r"\s+", "", match.group(1)))
     month = int(match.group(2))
     day = int(match.group(3))
-    if not (1 <= month <= 12 and 1 <= day <= 31):
+    try:
+        date(year, month, day)
+    except ValueError:
         return ""
     return f"{year:04d}-{month:02d}-{day:02d}"
 
@@ -305,20 +311,37 @@ def page_texts(document):
 def candidate_windows(page_no: int, text: str, label_pattern: str, canonical_label: str):
     windows = []
     for match in re.finditer(label_pattern, text or "", re.I):
-        start = max(0, match.start() - 30)
         end = min(len(text), match.end() + 100)
-        window = text[start:end]
-        for date_match in re.finditer(rf"({DATE_TOKEN})(?:\s*(?:至|到|~|～|-|—)\s*({DATE_TOKEN}))?", window, re.I):
-            selected = normalize_date(date_match.group(2) or date_match.group(1))
-            if not selected:
-                continue
-            original = re.sub(r"\s+", " ", window.strip())
+        candidate_text = text[match.end():end]
+        next_label = re.search(
+            r"(?:报告)?签发日期|出具日期|Date\s+of\s+Issue|报告日期|样品日期|收样日期|送样日期|来样日期|"
+            r"接收日期|收件日期|生产日期|委托日期|有效期|截止日期|(?:样品)?(?:检测日期|检验日期)|"
+            r"(?:检测|检验|测试)(?:开始|结束)日期",
+            candidate_text,
+            re.I,
+        )
+        if next_label:
+            candidate_text = candidate_text[:next_label.start()]
+        first_date = re.search(DATE_TOKEN, candidate_text, re.I)
+        if first_date:
+            trailing_text = candidate_text[first_date.end():]
+            trailing_boundary = re.search(r"[；;。\n]|[\u4e00-\u9fff]{1,12}日期\s*[:：]?", trailing_text)
+            if trailing_boundary:
+                candidate_text = candidate_text[:first_date.end() + trailing_boundary.start()]
+        for date_match in re.finditer(rf"({DATE_TOKEN})(?:\s*(?:至|到|~|～|-|—)\s*({DATE_TOKEN}))?", candidate_text, re.I):
+            selected_token = date_match.group(2) or date_match.group(1)
+            selected = normalize_date(selected_token)
+            context_start = max(0, match.start() - 30)
+            context_end = min(len(text), match.end() + date_match.end() + 30)
+            original = re.sub(r"\s+", " ", text[context_start:context_end].strip())
             windows.append({
                 "date": selected,
                 "label": canonical_label,
                 "page": page_no,
                 "original": original[:220],
                 "is_range": bool(date_match.group(2)),
+                "valid": bool(selected),
+                "invalid_reason": "" if selected else f"非法日历日期：{re.sub(r'\s+', '', selected_token)}",
             })
     return windows
 
@@ -332,21 +355,31 @@ def extract_report_issue_date(document):
     ]
     pages = page_texts(document)
     first_page = pages[:1]
+    rejected_invalid = []
+    searched_candidates = []
     for canonical_label, label_pattern in priorities:
         candidates = []
         for page_no, text in first_page:
             candidates.extend(candidate_windows(page_no, text, label_pattern, canonical_label))
         search_scope = "首页"
-        if not candidates:
+        if not any(candidate.get("date") for candidate in candidates):
             for page_no, text in pages[1:]:
                 candidates.extend(candidate_windows(page_no, text, label_pattern, canonical_label))
-            search_scope = "全文"
-        unique_dates = list(dict.fromkeys(candidate["date"] for candidate in candidates))
+            if any(candidate.get("date") for candidate in candidates):
+                search_scope = "全文"
+        searched_candidates.extend(candidates)
+        invalid_candidates = [candidate for candidate in candidates if not candidate.get("valid", True)]
+        valid_candidates = [candidate for candidate in candidates if candidate.get("date")]
+        unique_dates = list(dict.fromkeys(candidate["date"] for candidate in valid_candidates))
+        rejected_invalid.extend(invalid_candidates)
         if len(unique_dates) == 1:
             selected = unique_dates[0]
             selected_candidate = next(candidate for candidate in candidates if candidate["date"] == selected)
             reason = f"已识别｜{search_scope}第{selected_candidate['page']}页{canonical_label}：{selected_candidate['original']}"
-            return selected, "已识别", canonical_label, selected_candidate["original"], reason, candidates
+            if rejected_invalid:
+                invalid_values = "；".join(candidate["invalid_reason"] for candidate in rejected_invalid)
+                reason += f"；已排除非法日期候选：{invalid_values}"
+            return selected, "已识别", canonical_label, selected_candidate["original"], reason, searched_candidates
         if len(unique_dates) > 1:
             selected = max(unique_dates)
             selected_candidate = next(candidate for candidate in candidates if candidate["date"] == selected)
@@ -355,5 +388,16 @@ def extract_report_issue_date(document):
                 f"已识别｜{canonical_label}同一优先级出现多个日期：{'; '.join(unique_dates)}；"
                 f"按最新规则采用较晚日期{selected}（第{selected_candidate['page']}页）"
             )
-            return selected, "已识别", canonical_label, originals, reason, candidates
+            if rejected_invalid:
+                invalid_values = "；".join(candidate["invalid_reason"] for candidate in rejected_invalid)
+                reason += f"；已排除非法日期候选：{invalid_values}"
+            return selected, "已识别", canonical_label, originals, reason, searched_candidates
+    if rejected_invalid:
+        first_invalid = rejected_invalid[0]
+        originals = "；".join(candidate["original"] for candidate in rejected_invalid)
+        invalid_values = "；".join(candidate["invalid_reason"] for candidate in rejected_invalid)
+        return (
+            "", "待复核", first_invalid["label"], originals,
+            f"待复核｜日期字段仅包含非法日期候选：{invalid_values}", searched_candidates,
+        )
     return "", "未发现", "", "", "未发现｜首页及全文未找到签发日期、出具日期、报告日期、检测日期", []
